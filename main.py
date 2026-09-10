@@ -34,41 +34,101 @@ SYMBOLS = [
 ]
 
 CACHE_FILE = 'sent_signals.json'
+NEWS_MAX_AGE_HOURS = 48  # لا تُرسل خبراً أقدم من هذا حتى عند أول تشغيل
 
-def load_sent_cache():
+
+def load_cache():
+    """
+    شكل الكاش الجديد لكل سهم:
+    {
+      "1120": {
+          "was_bullish": true/false,   # هل كانت الشروط محققة في آخر فحص
+          "last_alert_price": 32.5,    # آخر سعر تم التنبيه عنده
+          "last_news_id": "abcd123"    # معرّف آخر خبر تم إرساله
+      }
+    }
+    """
     if os.path.exists(CACHE_FILE):
         try:
-            with open(CACHE_FILE, 'r') as f:
-                return json.load(f)
+            with open(CACHE_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                # توافق مع الكاش القديم (كان مجرد timestamp رقمي لكل رمز)
+                migrated = {}
+                for sym, val in data.items():
+                    if isinstance(val, dict):
+                        migrated[sym] = val
+                    else:
+                        migrated[sym] = {"was_bullish": True, "last_alert_price": None, "last_news_id": None}
+                return migrated
         except Exception:
             return {}
     return {}
 
-def save_sent_cache(cache):
+
+def save_cache(cache):
     try:
-        with open(CACHE_FILE, 'w') as f:
-            json.dump(cache, f)
+        with open(CACHE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(cache, f, ensure_ascii=False)
     except Exception as e:
         print(f"Error saving cache: {e}")
 
-def is_recently_sent(symbol, cache, cooldown_hours=24):
-    if symbol in cache:
-        last_sent_time = cache[symbol]
-        current_time = time.time()
-        if (current_time - last_sent_time) < (cooldown_hours * 3600):
-            return True
-    return False
 
-def analyze_stock(ticker, cache):
+def get_latest_news(ticker):
+    """
+    يجلب أحدث خبر حقيقي للسهم من yfinance.
+    يعيد dict فيه id, title, link, publish_time أو None إن لم يوجد خبر مناسب.
+    """
     try:
-        symbol_code = ticker.replace('.SR', '')
-        
-        # حماية صارمة ضد التكرار
-        if is_recently_sent(symbol_code, cache):
+        news_items = yf.Ticker(ticker).news
+        if not news_items:
             return None
 
+        for item in news_items:
+            # بعض إصدارات yfinance تضع البيانات مباشرة، وبعضها تحت مفتاح 'content'
+            content = item.get('content', item)
+
+            news_id = item.get('id') or content.get('id') or content.get('title')
+            title = content.get('title') or content.get('summary')
+            link = (
+                content.get('canonicalUrl', {}).get('url')
+                if isinstance(content.get('canonicalUrl'), dict)
+                else content.get('link') or content.get('clickThroughUrl', {}).get('url')
+            )
+            pub_date = content.get('pubDate') or item.get('providerPublishTime')
+
+            # تطبيع الوقت إلى timestamp
+            pub_ts = None
+            if isinstance(pub_date, (int, float)):
+                pub_ts = float(pub_date)
+            elif isinstance(pub_date, str):
+                try:
+                    pub_ts = datetime.fromisoformat(pub_date.replace('Z', '+00:00')).timestamp()
+                except Exception:
+                    pub_ts = None
+
+            if not title or not link:
+                continue
+
+            if pub_ts and (time.time() - pub_ts) > NEWS_MAX_AGE_HOURS * 3600:
+                continue
+
+            return {
+                'id': str(news_id) if news_id else title,
+                'title': title,
+                'link': link,
+            }
+    except Exception as e:
+        print(f"Error fetching news for {ticker}: {e}")
+
+    return None
+
+
+def analyze_stock(ticker):
+    try:
+        symbol_code = ticker.replace('.SR', '')
+
         df = yf.download(ticker, period='100d', interval='1d', progress=False)
-        
+
         if df.empty or len(df) < 50:
             return None
 
@@ -100,59 +160,85 @@ def analyze_stock(ticker, cache):
         ema21_val = float(last['EMA_21'].iloc[0]) if isinstance(last['EMA_21'], pd.Series) else float(last['EMA_21'])
         vol_val = float(last['Volume'].iloc[0]) if isinstance(last['Volume'], pd.Series) else float(last['Volume'])
         vol_sma_val = float(last['Vol_SMA'].iloc[0]) if isinstance(last['Vol_SMA'], pd.Series) else float(last['Vol_SMA'])
+        close_price = float(last['Close'].iloc[0]) if isinstance(last['Close'], pd.Series) else float(last['Close'])
 
         # شروط الدخول
         ema_bullish = ema9_val > ema21_val
         rsi_bullish = rsi_val > 55.0
         volume_bullish = vol_val > vol_sma_val
 
-        if ema_bullish and rsi_bullish and volume_bullish:
-            close_price = float(last['Close'].iloc[0]) if isinstance(last['Close'], pd.Series) else float(last['Close'])
+        is_bullish = ema_bullish and rsi_bullish and volume_bullish
 
-            return {
-                'symbol': symbol_code,
-                'price': round(close_price, 2),
-                'rsi': round(rsi_val, 2),
-                'ema9': round(ema9_val, 2),
-                'ema21': round(ema21_val, 2),
-                # رابط الأخبار المباشر من Investing.com
-                'investing_url': f"https://sa.investing.com/search/?q={symbol_code}",
-                # رابط الشارت المباشر من TradingView
-                'tv_url': f"https://ar.tradingview.com/chart/?symbol=TADAWUL%3A{symbol_code}"
-            }
+        return {
+            'symbol': symbol_code,
+            'ticker': ticker,
+            'is_bullish': is_bullish,
+            'price': round(close_price, 2),
+            'rsi': round(rsi_val, 2),
+            'ema9': round(ema9_val, 2),
+            'ema21': round(ema21_val, 2),
+        }
     except Exception as e:
         print(f"Error processing {ticker}: {e}")
     return None
 
+
 def main():
     print("بدء فحص كامل أسهم السوق الرئيسي المفلترة...")
-    sent_cache = load_sent_cache()
+    cache = load_cache()
     signals = []
-    
+
     for symbol in SYMBOLS:
-        result = analyze_stock(symbol, sent_cache)
-        if result:
-            signals.append(result)
+        result = analyze_stock(symbol)
+        if result is None:
+            continue
+
+        symbol_code = result['symbol']
+        prev = cache.get(symbol_code, {"was_bullish": False, "last_alert_price": None, "last_news_id": None})
+
+        # === منع التكرار: نرسل فقط عند حدوث تحوّل جديد (من غير محقق إلى محقق) ===
+        fresh_crossover = result['is_bullish'] and not prev.get('was_bullish', False)
+
+        # تحديث حالة السهم دائماً (سواء صعودي أو لا) حتى نكتشف التحوّل القادم بشكل صحيح
+        cache[symbol_code] = {
+            "was_bullish": result['is_bullish'],
+            "last_alert_price": result['price'] if fresh_crossover else prev.get('last_alert_price'),
+            "last_news_id": prev.get('last_news_id'),
+        }
+
+        if not fresh_crossover:
+            continue
+
+        # === جلب خبر حقيقي حديث للسهم (إن وجد) ===
+        news = get_latest_news(result['ticker'])
+        news_is_new = news and news['id'] != prev.get('last_news_id')
+        if news:
+            cache[symbol_code]['last_news_id'] = news['id']
+
+        result['news'] = news if news_is_new else None
+        signals.append(result)
 
     if signals:
         message = "🚀 **تنبيه فرصة جديدة - السوق السعودي** 🚀\n\n"
         for s in signals:
             message += f"🔹 **السهم:** `{s['symbol']}`\n"
             message += f"📊 **السعر الحالي:** {s['price']} ريال\n"
-            message += f"📈 **RSI (TradingView):** {s['rsi']}\n"
+            message += f"📈 **RSI:** {s['rsi']}\n"
             message += f"☁️ **EMA 9 / 21:** {s['ema9']} / {s['ema21']}\n"
-            message += f"📈 [الشارت المباشر (TradingView)]({s['tv_url']})\n"
-            message += f"📰 [أخبار وإفصاحات السهم (Investing.com)]({s['investing_url']})\n"
+            message += f"📈 [الشارت المباشر (TradingView)](https://ar.tradingview.com/chart/?symbol=TADAWUL%3A{s['symbol']})\n"
+            if s.get('news'):
+                message += f"📰 [{s['news']['title']}]({s['news']['link']})\n"
+            else:
+                message += f"📰 [بحث عن أخبار السهم](https://sa.investing.com/search/?q={s['symbol']})\n"
             message += "-------------------\n"
-            
-            # تسجيل التوقيت الحالي لحظر إرساله مجدداً لـ 24 ساعة
-            sent_cache[s['symbol']] = time.time()
-        
+
         bot.send_message(TELEGRAM_CHAT_ID, message, parse_mode='Markdown', disable_web_page_preview=True)
-        save_sent_cache(sent_cache)
         print(f"تم إرسال {len(signals)} تنبيه جديد إلى التلجرام.")
     else:
-        print("لا توجد فرص جديدة أو تم إرسال تنبيهات لجميع الأسهم المطابقة خلال الـ 24 ساعة الماضية.")
+        print("لا توجد تحولات صعودية جديدة في هذا الفحص.")
+
+    save_cache(cache)
+
 
 if __name__ == '__main__':
     main()
