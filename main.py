@@ -54,7 +54,6 @@ def is_recently_sent(symbol, cache, cooldown_hours=24):
     if symbol in cache:
         last_sent_time = cache[symbol]
         current_time = time.time()
-        # التأكد من مرور 24 ساعة (86,400 ثانية) قبل التنبيه مرة أخرى
         if (current_time - last_sent_time) < (cooldown_hours * 3600):
             return True
     return False
@@ -63,7 +62,6 @@ def analyze_stock(ticker, cache):
     try:
         symbol_code = ticker.replace('.SR', '')
         
-        # تخطي السهم إذا تم إرسال تنبيه عنه مؤخراً
         if is_recently_sent(symbol_code, cache):
             return None
 
@@ -115,8 +113,8 @@ def analyze_stock(ticker, cache):
                 'rsi': round(rsi_val, 2),
                 'ema9': round(ema9_val, 2),
                 'ema21': round(ema21_val, 2),
-                # رابط إعلانات وإجراءات الشركات المباشر من تداول السعودية
-                'announcements_url': f"https://www.saudiexchange.sa/wps/portal/saudiexchange/hidden/company-profile-main/?companySymbol={symbol_code}",
+                # رابط مباشر لا يوجه للصفحة الرئيسية ويفتح إعلانات السهم مباشرة
+                'announcements_url': f"https://www.argaam.com/ar/company/companydisclosures/marketid/3/companyid/{symbol_code}",
                 'tv_url': f"https://ar.tradingview.com/symbols/TADAWUL-{symbol_code}/"
             }
     except Exception as e:
@@ -141,10 +139,9 @@ def main():
             message += f"📈 **RSI (TradingView):** {s['rsi']}\n"
             message += f"☁️ **EMA 9 / 21:** {s['ema9']} / {s['ema21']}\n"
             message += f"📈 [الشارت المباشر (TradingView)]({s['tv_url']})\n"
-            message += f"📰 [إعلانات وإجراءات الشركة (Saudi Exchange)]({s['announcements_url']})\n"
+            message += f"📰 [أحدث الإفصاحات والأخبار]({s['announcements_url']})\n"
             message += "-------------------\n"
             
-            # تحديث السجل للسهم لتجنب التكرار
             sent_cache[s['symbol']] = time.time()
         
         bot.send_message(TELEGRAM_CHAT_ID, message, parse_mode='Markdown', disable_web_page_preview=True)
