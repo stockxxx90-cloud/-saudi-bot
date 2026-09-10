@@ -113,8 +113,8 @@ def analyze_stock(ticker, cache):
                 'rsi': round(rsi_val, 2),
                 'ema9': round(ema9_val, 2),
                 'ema21': round(ema21_val, 2),
-                # رابط البحث المباشر عن السهم في أرقام
-                'argaam_url': f"https://www.argaam.com/ar/search?q={symbol_code}",
+                # رابط مباشر لمستجدات وإعلانات السهم المباشرة
+                'news_url': f"https://www.mubasher.info/markets/TDWL/stocks/{symbol_code}/news",
                 # رابط الشارت المباشر في TradingView
                 'tv_url': f"https://ar.tradingview.com/chart/?symbol=TADAWUL%3A{symbol_code}"
             }
@@ -140,7 +140,7 @@ def main():
             message += f"📈 **RSI (TradingView):** {s['rsi']}\n"
             message += f"☁️ **EMA 9 / 21:** {s['ema9']} / {s['ema21']}\n"
             message += f"📈 [الشارت المباشر (TradingView)]({s['tv_url']})\n"
-            message += f"📰 [أخبار وإفصاحات السهم (أرقام)]({s['argaam_url']})\n"
+            message += f"📰 [أخبار وإعلانات السهم المباشرة]({s['news_url']})\n"
             message += "-------------------\n"
             
             sent_cache[s['symbol']] = time.time()
