@@ -5,6 +5,7 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import telebot
+from datetime import datetime
 
 # 1. جلب بيانات الاعتماد من البيئة (Secrets)
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
@@ -62,6 +63,7 @@ def analyze_stock(ticker, cache):
     try:
         symbol_code = ticker.replace('.SR', '')
         
+        # حماية صارمة ضد التكرار
         if is_recently_sent(symbol_code, cache):
             return None
 
@@ -78,7 +80,7 @@ def analyze_stock(ticker, cache):
         df['EMA_9'] = df['Close'].ewm(span=9, adjust=False).mean()
         df['EMA_21'] = df['Close'].ewm(span=21, adjust=False).mean()
 
-        # حساب RSI بمعادلة Wilder's Smoothing
+        # حساب RSI
         delta = df['Close'].diff()
         gain = delta.where(delta > 0, 0.0)
         loss = -delta.where(delta < 0, 0.0)
@@ -113,9 +115,9 @@ def analyze_stock(ticker, cache):
                 'rsi': round(rsi_val, 2),
                 'ema9': round(ema9_val, 2),
                 'ema21': round(ema21_val, 2),
-                # رابط مباشر لمستجدات وإعلانات السهم المباشرة
-                'news_url': f"https://www.mubasher.info/markets/TDWL/stocks/{symbol_code}/news",
-                # رابط الشارت المباشر في TradingView
+                # رابط الأخبار المباشر من Investing.com
+                'investing_url': f"https://sa.investing.com/search/?q={symbol_code}",
+                # رابط الشارت المباشر من TradingView
                 'tv_url': f"https://ar.tradingview.com/chart/?symbol=TADAWUL%3A{symbol_code}"
             }
     except Exception as e:
@@ -140,9 +142,10 @@ def main():
             message += f"📈 **RSI (TradingView):** {s['rsi']}\n"
             message += f"☁️ **EMA 9 / 21:** {s['ema9']} / {s['ema21']}\n"
             message += f"📈 [الشارت المباشر (TradingView)]({s['tv_url']})\n"
-            message += f"📰 [أخبار وإعلانات السهم المباشرة]({s['news_url']})\n"
+            message += f"📰 [أخبار وإفصاحات السهم (Investing.com)]({s['investing_url']})\n"
             message += "-------------------\n"
             
+            # تسجيل التوقيت الحالي لحظر إرساله مجدداً لـ 24 ساعة
             sent_cache[s['symbol']] = time.time()
         
         bot.send_message(TELEGRAM_CHAT_ID, message, parse_mode='Markdown', disable_web_page_preview=True)
