@@ -29,28 +29,32 @@ SYMBOLS = [
     '4031.SR', '4260.SR', '4261.SR', '4262.SR', '4263.SR', '4020.SR', '4100.SR', '4130.SR', '4140.SR', '4150.SR', '4220.SR', '4230.SR', '4250.SR', '4300.SR', '4310.SR', '4320.SR', '4321.SR', '4322.SR', '2083.SR', '2084.SR', '4061.SR', '5110.SR'
 ]
 
-# --- آلية منع التكرار ---
+# --- آلية الحظر الدقيقة (منع التكرار خلال 24 ساعة) ---
 def is_recently_sent(symbol):
+    # 1. فحص القاعدة السحابية Redis
     if UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN:
         try:
             url = f"{UPSTASH_REDIS_REST_URL}/get/{symbol}"
             headers = {"Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}"}
             res = requests.get(url, headers=headers).json()
-            return res.get("result") is not None
+            if res.get("result") is not None:
+                return True
         except Exception:
             pass
     
+    # 2. فحص السجل المحلي
     if os.path.exists('sent_signals.json'):
         try:
             with open('sent_signals.json', 'r') as f:
                 cache = json.load(f)
-                if symbol in cache and (time.time() - cache[symbol]) < 86400:
+                if symbol in cache and (time.time() - cache[symbol]) < 86400: # 86400 ثانية = 24 ساعة
                     return True
         except Exception:
             pass
     return False
 
 def save_sent(symbol):
+    # 1. حفظ في القاعدة السحابية مع وقت انتهاء تلقائي (24 ساعة)
     if UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN:
         try:
             url = f"{UPSTASH_REDIS_REST_URL}/set/{symbol}/SENT/EX/86400"
@@ -59,6 +63,7 @@ def save_sent(symbol):
         except Exception:
             pass
     
+    # 2. حفظ في السجل المحلي
     cache = {}
     if os.path.exists('sent_signals.json'):
         try:
@@ -73,49 +78,53 @@ def save_sent(symbol):
     except Exception:
         pass
 
-# --- دالة فحص الدايفرجنس ---
+# --- فحص الدايفرنجس ---
 def detect_divergence(closes, rsi):
     try:
         if len(closes) < 15:
-            return "لا يوجد"
+            return ""
 
         p1_price, p2_price = closes[-15], closes[-1]
         p1_rsi, p2_rsi = rsi[-15], rsi[-1]
 
-        if p2_price < p1_price and p2_rsi > p1_rsi:
-            return "إيجابي عادي 🟢"
-        
-        if p2_price > p1_price and p2_rsi < p1_rsi:
-            return "إيجابي مخفي 🟣"
+        if (p2_price < p1_price and p2_rsi > p1_rsi) or (p2_price > p1_price and p2_rsi < p1_rsi):
+            return "✅"
     except Exception:
         pass
-    return "لا يوجد"
+    return ""
 
 def analyze_stock(ticker):
     try:
         symbol_code = ticker.replace('.SR', '')
 
+        # التأكد المباشر قبل التحليل: إذا أُرسل السهم سابقاً يتم إغلاق التحليل وتخطيه فوراً
         if is_recently_sent(symbol_code):
             return None
 
-        df = yf.download(ticker, period='150d', interval='1d', progress=False)
+        stock = yf.Ticker(ticker)
+        df = stock.history(period='150d', interval='1d')
         if df.empty or len(df) < 50:
             return None
 
-        if isinstance(df.columns, pd.MultiIndex):
-            df = df.xs(ticker, level=1, axis=1)
+        info = stock.info
+        company_name = info.get('shortName', symbol_code)
+        sector_name = info.get('sector', 'تداول')
 
         closes = df['Close'].dropna()
+        volumes = df['Volume'].dropna()
+        
         if len(closes) < 50:
             return None
 
-        # حساب المتوسطات EMA
+        price_change_pct = round(((closes.iloc[-1] - closes.iloc[-2]) / closes.iloc[-2]) * 100, 2)
+        avg_vol = volumes.iloc[-20:-1].mean()
+        vol_change_pct = round(((volumes.iloc[-1] - avg_vol) / avg_vol) * 100, 2) if avg_vol > 0 else 0
+
         ema8 = closes.ewm(span=8, adjust=False).mean()
         ema21 = closes.ewm(span=21, adjust=False).mean()
         ema34 = closes.ewm(span=34, adjust=False).mean()
         ema50 = closes.ewm(span=50, adjust=False).mean()
 
-        # حساب RSI
         delta = closes.diff()
         gain = delta.where(delta > 0, 0.0)
         loss = -delta.where(delta < 0, 0.0)
@@ -131,29 +140,20 @@ def analyze_stock(ticker):
         e34_val = float(ema34.iloc[-1])
         e50_val = float(ema50.iloc[-1])
 
-        # الشروط الفنية
         if (e8_val > e21_val) and (e34_val > e50_val) and (rsi_val > 55.0):
             div_status = detect_divergence(closes.values, rsi.values)
-
-            t1 = round(c_val * 1.02, 2)
-            t2 = round(c_val * 1.04, 2)
-            t3 = round(c_val * 1.06, 2)
-            t4 = round(c_val * 1.08, 2)
-
-            stop_near = round(e21_val, 2)
-            stop_bloody = round(e50_val, 2)
+            trend = "صاعد 📈" if e8_val > e21_val and e34_val > e50_val else "تذبذب"
 
             return {
                 'symbol': symbol_code,
-                'entry': round(c_val, 2),
+                'company': company_name,
+                'sector': sector_name,
                 'rsi': round(rsi_val, 2),
-                'mid_cloud': f"{round(e8_val, 2)} / {round(e21_val, 2)}",
-                'long_cloud': f"{round(e34_val, 2)} / {round(e50_val, 2)}",
+                'cloud': f"{round(e8_val, 2)} / {round(e21_val, 2)}",
+                'trend': trend,
+                'vol_change': vol_change_pct,
+                'price_change': price_change_pct,
                 'divergence': div_status,
-                't1': t1, 't2': t2, 't3': t3, 't4': t4,
-                'stop_near': stop_near,
-                'stop_bloody': stop_bloody,
-                'investing_url': f"https://sa.investing.com/search/?q={symbol_code}",
                 'tv_url': f"https://ar.tradingview.com/chart/?symbol=TADAWUL%3A{symbol_code}"
             }
     except Exception as e:
@@ -167,31 +167,23 @@ def main():
     for symbol in SYMBOLS:
         s = analyze_stock(symbol)
         if s:
-            # صياغة رسالة لكل سهم بشكل مستقل لتفادي تجاوز طول النص
-            msg = f"🎯 **تنبيه فرصة جديدة (سحابات EMA والدايفرجنس)** 🎯\n\n"
-            msg += f"🔹 **السهم:** `{s['symbol']}`\n"
-            msg += f"📍 **نقطة الدخول:** {s['entry']} ريال\n"
-            msg += f"📈 **RSI:** {s['rsi']}\n"
-            msg += f"☁️ **سحابة المتوسط (8-21):** {s['mid_cloud']}\n"
-            msg += f"☁️ **سحابة الاتجاه (34-50):** {s['long_cloud']}\n"
-            msg += f"🔄 **الدايفرجنس:** {s['divergence']}\n"
-            msg += "-------------------\n"
-            msg += f"🎯 **الهدف 1 (2%+):** {s['t1']} ريال\n"
-            msg += f"🎯 **الهدف 2 (4%+):** {s['t2']} ريال\n"
-            msg += f"🎯 **الهدف 3 (6%+):** {s['t3']} ريال\n"
-            msg += f"🎯 **الهدف 4 (8%+):** {s['t4']} ريال\n"
-            msg += "-------------------\n"
-            msg += f"🛑 **وقف الخسارة القريب (EMA 21):** {s['stop_near']} ريال\n"
-            msg += f"🩸 **الوقف الدموي (EMA 50):** {s['stop_bloody']} ريال\n"
-            msg += "-------------------\n"
-            msg += f"📈 [الشارت المباشر (TradingView)]({s['tv_url']})\n"
-            msg += f"📰 [أخبار وإفصاحات السهم (Investing.com)]({s['investing_url']})\n"
+            msg = f"**الرمز:** {s['symbol']}\n"
+            msg += f"**الشركة:** {s['company']}\n"
+            msg += f"**القطاع:** {s['sector']}\n"
+            msg += f"**Rsi:** {s['rsi']}\n"
+            msg += f"**سحابة المتوسط:** {s['cloud']}\n"
+            msg += f"**الاتجاه:** {s['trend']}\n"
+            msg += f"**تغير الحجم:** %{s['vol_change']}\n"
+            msg += f"**تغير السعر اليومي:** %{s['price_change']}\n"
+            msg += f"**الدايفرنجس:** {s['divergence']}\n\n"
+            msg += f"📈 [الشارت المباشر]({s['tv_url']})"
 
             try:
                 bot.send_message(TELEGRAM_CHAT_ID, msg, parse_mode='Markdown', disable_web_page_preview=True)
+                # تسجيل السهم فوراً للحظر لمدة 24 ساعة
                 save_sent(s['symbol'])
                 signals_count += 1
-                time.sleep(0.5) # مهلة بسيطة بين كل إرسال
+                time.sleep(0.5)
             except Exception as e:
                 print(f"خطأ في إرسال السهم {s['symbol']}: {e}")
 
