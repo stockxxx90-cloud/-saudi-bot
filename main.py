@@ -11,7 +11,6 @@ import telebot
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 
-# للربط بحافظة التكرار السحابية (ضع قيمها في Secrets اختارياً، أو سيعتمد المحلي في حال عدم وجودها)
 UPSTASH_REDIS_REST_URL = os.environ.get('UPSTASH_REDIS_REST_URL')
 UPSTASH_REDIS_REST_TOKEN = os.environ.get('UPSTASH_REDIS_REST_TOKEN')
 
@@ -23,22 +22,20 @@ SYMBOLS = [
     '7010.SR', '7020.SR', '7030.SR', '7200.SR', '7201.SR', '7202.SR', '7203.SR', '7204.SR',
     '2070.SR', '2284.SR', '4003.SR', '4013.SR', '4014.SR', '4015.SR',
     '1810.SR', '1830.SR', '1831.SR', '1832.SR', '1833.SR', '2050.SR', '2080.SR', '2081.SR', '2082.SR', '2100.SR', '2110.SR', '2130.SR', '2140.SR', '2160.SR', '2190.SR', '2270.SR', '2280.SR', '2281.SR', '2282.SR', '2283.SR', '2320.SR', '4001.SR', '4002.SR', '4004.SR', '4007.SR', '4009.SR', '4012.SR', '4030.SR', '4040.SR', '4050.SR', '4070.SR', '4071.SR', '4080.SR', '4081.SR', '4082.SR', '4160.SR', '4161.SR', '4162.SR', '4163.SR', '4164.SR', '4190.SR', '4191.SR', '4192.SR', '4200.SR', '4240.SR', '6001.SR', '6002.SR', '6010.SR', '6012.SR', '6013.SR', '6014.SR', '6015.SR', '6020.SR', '6040.SR', '6050.SR', '6060.SR', '6070.SR', '6090.SR',
-    '4031.SR', '4260.SR', '4261.SR', '4262.SR', '4263.SR',
-    '4020.SR', '4100.SR', '4130.SR', '4140.SR', '4150.SR', '4220.SR', '4230.SR', '4250.SR', '4300.SR', '4310.SR', '4320.SR', '4321.SR', '4322.SR', '2083.SR', '2084.SR', '4061.SR', '5110.SR'
+    '4031.SR', '4260.SR', '4261.SR', '4262.SR', '4263.SR', '4020.SR', '4100.SR', '4130.SR', '4140.SR', '4150.SR', '4220.SR', '4230.SR', '4250.SR', '4300.SR', '4310.SR', '4320.SR', '4321.SR', '4322.SR', '2083.SR', '2084.SR', '4061.SR', '5110.SR'
 ]
 
-# --- آلية منع التكرار السحابية والمحلية ---
-def is_recently_sent_cloud(symbol):
+# --- آلية التكرار ---
+def is_recently_sent(symbol):
     if UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN:
         try:
             url = f"{UPSTASH_REDIS_REST_URL}/get/{symbol}"
             headers = {"Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}"}
             res = requests.get(url, headers=headers).json()
             return res.get("result") is not None
-        except Exception as e:
-            print(f"Cloud cache check error: {e}")
+        except Exception:
+            pass
     
-    # البديل المحلي
     if os.path.exists('sent_signals.json'):
         try:
             with open('sent_signals.json', 'r') as f:
@@ -49,16 +46,15 @@ def is_recently_sent_cloud(symbol):
             pass
     return False
 
-def save_sent_cloud(symbol):
+def save_sent(symbol):
     if UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN:
         try:
             url = f"{UPSTASH_REDIS_REST_URL}/set/{symbol}/SENT/EX/86400"
             headers = {"Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}"}
             requests.get(url, headers=headers)
-        except Exception as e:
-            print(f"Cloud cache save error: {e}")
+        except Exception:
+            pass
     
-    # الحفظ المحلي كنسخة احتياطية
     cache = {}
     if os.path.exists('sent_signals.json'):
         try:
@@ -73,27 +69,22 @@ def save_sent_cloud(symbol):
     except Exception:
         pass
 
-# --- فحص الدايفرجنس الإيجابي العادي والمخفي ---
-def detect_divergence(df):
+# --- دالة فحص الدايفرجنس الإيجابي العادي والمخفي ---
+def detect_divergence(closes, rsi):
     try:
-        closes = df['Close'].values
-        rsi = df['RSI'].values
-        
         if len(closes) < 15:
-            return "لا يوجد"
+            return "غير محدد"
 
-        # قيعان مؤشر RSI والسعر في النطاق الأخير (آخر 15 شمعة)
         p1_price, p2_price = closes[-15], closes[-1]
         p1_rsi, p2_rsi = rsi[-15], rsi[-1]
 
-        # دايفرجنس إيجابي عادي: السعر يعمل قاع أدنى والرالي يصنع قاع أعلى
+        # دايفرجنس إيجابي عادي (قاع أدنى للسعر مع قاع أعلى للـ RSI)
         if p2_price < p1_price and p2_rsi > p1_rsi:
             return "إيجابي عادي 🟢"
         
-        # دايفرجنس إيجابي مخفي: السعر يعمل قاع أعلى والرالي يصنع قاع أدنى
+        # دايفرجنس إيجابي مخفي (قاع أعلى للسعر مع قاع أدنى للـ RSI)
         if p2_price > p1_price and p2_rsi < p1_rsi:
             return "إيجابي مخفي 🟣"
-
     except Exception:
         pass
     return "لا يوجد"
@@ -102,66 +93,68 @@ def analyze_stock(ticker):
     try:
         symbol_code = ticker.replace('.SR', '')
 
-        if is_recently_sent_cloud(symbol_code):
+        if is_recently_sent(symbol_code):
             return None
 
+        # تنظيف وتحميل البيانات لتجنب أخطاء MultiIndex
         df = yf.download(ticker, period='150d', interval='1d', progress=False)
         if df.empty or len(df) < 50:
             return None
 
-        # حساب المتوسطات EMA (8, 21, 34, 50)
-        df['EMA_8'] = df['Close'].ewm(span=8, adjust=False).mean()
-        df['EMA_21'] = df['Close'].ewm(span=21, adjust=False).mean()
-        df['EMA_34'] = df['Close'].ewm(span=34, adjust=False).mean()
-        df['EMA_50'] = df['Close'].ewm(span=50, adjust=False).mean()
+        if isinstance(df.columns, pd.MultiIndex):
+            df = df.xs(ticker, level=1, axis=1)
 
-        # حساب RSI (14)
-        delta = df['Close'].diff()
+        closes = df['Close'].dropna()
+        if len(closes) < 50:
+            return None
+
+        # حساب المتوسطات المتحركة EMA Clouds
+        ema8 = closes.ewm(span=8, adjust=False).mean()
+        ema21 = closes.ewm(span=21, adjust=False).mean()
+        ema34 = closes.ewm(span=34, adjust=False).mean()
+        ema50 = closes.ewm(span=50, adjust=False).mean()
+
+        # حساب RSI
+        delta = closes.diff()
         gain = delta.where(delta > 0, 0.0)
         loss = -delta.where(delta < 0, 0.0)
         avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
         avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
         rs = avg_gain / avg_loss
-        df['RSI'] = 100 - (100 / (1 + rs))
+        rsi = 100 - (100 / (1 + rs))
 
-        last = df.iloc[-1]
-        
-        close_p = float(last['Close'].iloc[0]) if isinstance(last['Close'], pd.Series) else float(last['Close'])
-        rsi_val = float(last['RSI'].iloc[0]) if isinstance(last['RSI'], pd.Series) else float(last['RSI'])
-        ema8 = float(last['EMA_8'].iloc[0]) if isinstance(last['EMA_8'], pd.Series) else float(last['EMA_8'])
-        ema21 = float(last['EMA_21'].iloc[0]) if isinstance(last['EMA_21'], pd.Series) else float(last['EMA_21'])
-        ema34 = float(last['EMA_34'].iloc[0]) if isinstance(last['EMA_34'], pd.Series) else float(last['EMA_34'])
-        ema50 = float(last['EMA_50'].iloc[0]) if isinstance(last['EMA_50'], pd.Series) else float(last['EMA_50'])
+        # القيم الأخيرة
+        c_val = float(closes.iloc[-1])
+        rsi_val = float(rsi.iloc[-1])
+        e8_val = float(ema8.iloc[-1])
+        e21_val = float(ema21.iloc[-1])
+        e34_val = float(ema34.iloc[-1])
+        e50_val = float(ema50.iloc[-1])
 
-        # Шروط الاستراتيجية المطلوبة:
-        # 1. EMA Cloud (8-21) للاتجاه المتوسط
-        # 2. EMA Cloud (34-50) للاتجاه الرئيسي
+        # الشروط:
+        # 1. سحابة (8-21) صاعدة
+        # 2. سحابة (34-50) صاعدة
         # 3. RSI أكبر من 55
-        cloud_mid_bullish = ema8 > ema21
-        cloud_long_bullish = ema34 > ema50
-        rsi_bullish = rsi_val > 55.0
+        if (e8_val > e21_val) and (e34_val > e50_val) and (rsi_val > 55.0):
+            div_status = detect_divergence(closes.values, rsi.values)
 
-        if cloud_mid_bullish and cloud_long_bullish and rsi_bullish:
-            div_type = detect_divergence(df)
+            # الأهداف الأربعة
+            t1 = round(c_val * 1.02, 2)
+            t2 = round(c_val * 1.04, 2)
+            t3 = round(c_val * 1.06, 2)
+            t4 = round(c_val * 1.08, 2)
 
-            # نقطة الدخول والأهداف ووقف الخسارة
-            entry_price = close_p
-            t1 = round(entry_price * 1.02, 2)
-            t2 = round(entry_price * 1.04, 2)
-            t3 = round(entry_price * 1.06, 2)
-            t4 = round(entry_price * 1.08, 2)
-
-            # الوقف القريب (إغلاق تحت EMA 21) والوقف الدموي (إغلاق تحت EMA 50)
-            stop_near = round(ema21, 2)
-            stop_bloody = round(ema50, 2)
+            # وقف الخسارة
+            stop_near = round(e21_val, 2)
+            stop_bloody = round(e50_val, 2)
 
             return {
                 'symbol': symbol_code,
-                'entry': round(entry_price, 2),
+                'entry': round(c_val, 2),
                 'rsi': round(rsi_val, 2),
-                'mid_cloud': f"{round(ema8, 2)} / {round(ema21, 2)}",
-                'long_cloud': f"{round(ema34, 2)} / {round(ema50, 2)}",
-                'divergence': div_type,
+                'mid_cloud': f"{round(e8_val, 2)} / {round(e21_val, 2)}",
+                'long_cloud': f"{round(e34_val, 2)} / {round(e50_val, 2)}",
+                'divergence': div_status,
                 't1': t1, 't2': t2, 't3': t3, 't4': t4,
                 'stop_near': stop_near,
                 'stop_bloody': stop_bloody,
@@ -169,11 +162,11 @@ def analyze_stock(ticker):
                 'tv_url': f"https://ar.tradingview.com/chart/?symbol=TADAWUL%3A{symbol_code}"
             }
     except Exception as e:
-        print(f"Error processing {ticker}: {e}")
+        print(f"خطأ في معالجة {ticker}: {e}")
     return None
 
 def main():
-    print("بدء الفحص بالاستراتيجية المحدثة...")
+    print("بدء فحص الأسهم...")
     signals = []
 
     for symbol in SYMBOLS:
@@ -182,7 +175,7 @@ def main():
             signals.append(res)
 
     if signals:
-        message = "🎯 **تنبيه فرصة جديدة (استراتيجية السحابات والدايفرجنس)** 🎯\n\n"
+        message = "🎯 **تنبيه فرصة جديدة (سحابات EMA والدايفرجنس)** 🎯\n\n"
         for s in signals:
             message += f"🔹 **السهم:** `{s['symbol']}`\n"
             message += f"📍 **نقطة الدخول:** {s['entry']} ريال\n"
@@ -203,12 +196,12 @@ def main():
             message += f"📰 [أخبار وإفصاحات السهم (Investing.com)]({s['investing_url']})\n"
             message += "===================\n"
 
-            save_sent_cloud(s['symbol'])
+            save_sent(s['symbol'])
 
         bot.send_message(TELEGRAM_CHAT_ID, message, parse_mode='Markdown', disable_web_page_preview=True)
         print(f"تم إرسال {len(signals)} تنبيه بنجاح.")
     else:
-        print("لا توجد أسهم مطابقة للشروط حالياً أو تم إرسالها سابقاً.")
+        print("لا توجد فرصة مطابقة حالياً.")
 
 if __name__ == '__main__':
     main()
