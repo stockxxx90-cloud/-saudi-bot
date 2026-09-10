@@ -113,9 +113,10 @@ def analyze_stock(ticker, cache):
                 'rsi': round(rsi_val, 2),
                 'ema9': round(ema9_val, 2),
                 'ema21': round(ema21_val, 2),
-                # رابط مباشر لا يوجه للصفحة الرئيسية ويفتح إعلانات السهم مباشرة
-                'announcements_url': f"https://www.argaam.com/ar/company/companydisclosures/marketid/3/companyid/{symbol_code}",
-                'tv_url': f"https://ar.tradingview.com/symbols/TADAWUL-{symbol_code}/"
+                # رابط البحث المباشر عن السهم في أرقام
+                'argaam_url': f"https://www.argaam.com/ar/search?q={symbol_code}",
+                # رابط الشارت المباشر في TradingView
+                'tv_url': f"https://ar.tradingview.com/chart/?symbol=TADAWUL%3A{symbol_code}"
             }
     except Exception as e:
         print(f"Error processing {ticker}: {e}")
@@ -139,7 +140,7 @@ def main():
             message += f"📈 **RSI (TradingView):** {s['rsi']}\n"
             message += f"☁️ **EMA 9 / 21:** {s['ema9']} / {s['ema21']}\n"
             message += f"📈 [الشارت المباشر (TradingView)]({s['tv_url']})\n"
-            message += f"📰 [أحدث الإفصاحات والأخبار]({s['announcements_url']})\n"
+            message += f"📰 [أخبار وإفصاحات السهم (أرقام)]({s['argaam_url']})\n"
             message += "-------------------\n"
             
             sent_cache[s['symbol']] = time.time()
