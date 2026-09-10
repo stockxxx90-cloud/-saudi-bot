@@ -7,12 +7,16 @@ import pandas as pd
 import numpy as np
 import telebot
 
-# 1. جلب بيانات الاعتماد من البيئة (Secrets)
+# 1. جلب بيانات الاعتماد من المتغيرات السرية (Secrets)
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 
 UPSTASH_REDIS_REST_URL = os.environ.get('UPSTASH_REDIS_REST_URL')
 UPSTASH_REDIS_REST_TOKEN = os.environ.get('UPSTASH_REDIS_REST_TOKEN')
+
+# التحقق من وجود التوكن لتجنب انهيار التطبيق
+if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+    raise ValueError("خطأ: لم يتم ضبط TELEGRAM_TOKEN أو TELEGRAM_CHAT_ID في Secrets!")
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
@@ -25,7 +29,7 @@ SYMBOLS = [
     '4031.SR', '4260.SR', '4261.SR', '4262.SR', '4263.SR', '4020.SR', '4100.SR', '4130.SR', '4140.SR', '4150.SR', '4220.SR', '4230.SR', '4250.SR', '4300.SR', '4310.SR', '4320.SR', '4321.SR', '4322.SR', '2083.SR', '2084.SR', '4061.SR', '5110.SR'
 ]
 
-# --- آلية التكرار ---
+# --- إدارة حظر التكرار (سحابي / محلي) ---
 def is_recently_sent(symbol):
     if UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN:
         try:
@@ -69,20 +73,20 @@ def save_sent(symbol):
     except Exception:
         pass
 
-# --- دالة فحص الدايفرجنس الإيجابي العادي والمخفي ---
+# --- خوارزمية الدايفرجنس الإيجابي العادي والمخفي ---
 def detect_divergence(closes, rsi):
     try:
         if len(closes) < 15:
-            return "غير محدد"
+            return "لا يوجد"
 
         p1_price, p2_price = closes[-15], closes[-1]
         p1_rsi, p2_rsi = rsi[-15], rsi[-1]
 
-        # دايفرجنس إيجابي عادي (قاع أدنى للسعر مع قاع أعلى للـ RSI)
+        # دايفرجنس إيجابي عادي
         if p2_price < p1_price and p2_rsi > p1_rsi:
             return "إيجابي عادي 🟢"
         
-        # دايفرجنس إيجابي مخفي (قاع أعلى للسعر مع قاع أدنى للـ RSI)
+        # دايفرجنس إيجابي مخفي
         if p2_price > p1_price and p2_rsi < p1_rsi:
             return "إيجابي مخفي 🟣"
     except Exception:
@@ -96,7 +100,7 @@ def analyze_stock(ticker):
         if is_recently_sent(symbol_code):
             return None
 
-        # تنظيف وتحميل البيانات لتجنب أخطاء MultiIndex
+        # تنظيف وتفادي أخطاء السلاسل متعددة الأبعاد MultiIndex
         df = yf.download(ticker, period='150d', interval='1d', progress=False)
         if df.empty or len(df) < 50:
             return None
@@ -108,13 +112,13 @@ def analyze_stock(ticker):
         if len(closes) < 50:
             return None
 
-        # حساب المتوسطات المتحركة EMA Clouds
+        # حساب سحابات المتوسطات (8-21) و (34-50)
         ema8 = closes.ewm(span=8, adjust=False).mean()
         ema21 = closes.ewm(span=21, adjust=False).mean()
         ema34 = closes.ewm(span=34, adjust=False).mean()
         ema50 = closes.ewm(span=50, adjust=False).mean()
 
-        # حساب RSI
+        # حساب مؤشر RSI
         delta = closes.diff()
         gain = delta.where(delta > 0, 0.0)
         loss = -delta.where(delta < 0, 0.0)
@@ -123,7 +127,6 @@ def analyze_stock(ticker):
         rs = avg_gain / avg_loss
         rsi = 100 - (100 / (1 + rs))
 
-        # القيم الأخيرة
         c_val = float(closes.iloc[-1])
         rsi_val = float(rsi.iloc[-1])
         e8_val = float(ema8.iloc[-1])
@@ -131,20 +134,16 @@ def analyze_stock(ticker):
         e34_val = float(ema34.iloc[-1])
         e50_val = float(ema50.iloc[-1])
 
-        # الشروط:
-        # 1. سحابة (8-21) صاعدة
-        # 2. سحابة (34-50) صاعدة
-        # 3. RSI أكبر من 55
+        # تطبيق الشروط الفنية
         if (e8_val > e21_val) and (e34_val > e50_val) and (rsi_val > 55.0):
             div_status = detect_divergence(closes.values, rsi.values)
 
-            # الأهداف الأربعة
+            # استخراج الأهداف والوقف
             t1 = round(c_val * 1.02, 2)
             t2 = round(c_val * 1.04, 2)
             t3 = round(c_val * 1.06, 2)
             t4 = round(c_val * 1.08, 2)
 
-            # وقف الخسارة
             stop_near = round(e21_val, 2)
             stop_bloody = round(e50_val, 2)
 
@@ -162,11 +161,11 @@ def analyze_stock(ticker):
                 'tv_url': f"https://ar.tradingview.com/chart/?symbol=TADAWUL%3A{symbol_code}"
             }
     except Exception as e:
-        print(f"خطأ في معالجة {ticker}: {e}")
+        print(f"خطأ في السهم {ticker}: {e}")
     return None
 
 def main():
-    print("بدء فحص الأسهم...")
+    print("بدء عملية تحليل البيانات والحسابات الفنية...")
     signals = []
 
     for symbol in SYMBOLS:
@@ -201,7 +200,7 @@ def main():
         bot.send_message(TELEGRAM_CHAT_ID, message, parse_mode='Markdown', disable_web_page_preview=True)
         print(f"تم إرسال {len(signals)} تنبيه بنجاح.")
     else:
-        print("لا توجد فرصة مطابقة حالياً.")
+        print("لا توجد أسهم مطابقة للشروط الفنية حالياً.")
 
 if __name__ == '__main__':
     main()
