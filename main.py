@@ -1,19 +1,25 @@
 import os
 import json
 import time
-import yfinance as yf
-import pandas as pd
-import numpy as np
-import telebot
+import urllib.parse
+import xml.etree.ElementTree as ET
+from email.utils import parsedate_to_datetime
 from datetime import datetime
 
-# 1. جلب بيانات الاعتماد من البيئة (Secrets)
+import requests
+import yfinance as yf
+import pandas as pd
+import telebot
+
+# ====================== الإعدادات ======================
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
-
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
-# 2. القائمة الشاملة لأسهم السوق الرئيسي المفلترة
+CACHE_FILE = 'sent_signals.json'
+NEWS_MAX_AGE_HOURS = 48
+
+# القائمة الشاملة لأسهم السوق الرئيسي
 SYMBOLS = [
     # المصارف المسموحة
     '1120.SR', '1150.SR',
@@ -33,173 +39,213 @@ SYMBOLS = [
     '4020.SR', '4100.SR', '4130.SR', '4140.SR', '4150.SR', '4220.SR', '4230.SR', '4250.SR', '4300.SR', '4310.SR', '4320.SR', '4321.SR', '4322.SR', '2083.SR', '2084.SR', '4061.SR', '5110.SR'
 ]
 
-CACHE_FILE = 'sent_signals.json'
-NEWS_MAX_AGE_HOURS = 48  # لا تُرسل خبراً أقدم من هذا حتى عند أول تشغيل
+# خريطة اختيارية لأسماء الشركات (تحسّن دقة الأخبار)
+SYMBOL_NAMES = {
+    '2222': 'أرامكو السعودية',
+    '1120': 'مصرف الراجحي',
+    '2350': 'كيان السعودية',
+    '7010': 'إس تي سي',
+    # أضف المزيد حسب الحاجة
+}
 
-
+# ====================== الكاش ======================
 def load_cache():
-    """
-    شكل الكاش الجديد لكل سهم:
-    {
-      "1120": {
-          "was_bullish": true/false,   # هل كانت الشروط محققة في آخر فحص
-          "last_alert_price": 32.5,    # آخر سعر تم التنبيه عنده
-          "last_news_id": "abcd123"    # معرّف آخر خبر تم إرساله
-      }
-    }
-    """
     if os.path.exists(CACHE_FILE):
         try:
             with open(CACHE_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-                # توافق مع الكاش القديم (كان مجرد timestamp رقمي لكل رمز)
                 migrated = {}
                 for sym, val in data.items():
                     if isinstance(val, dict):
                         migrated[sym] = val
                     else:
-                        migrated[sym] = {"was_bullish": True, "last_alert_price": None, "last_news_id": None}
+                        migrated[sym] = {
+                            "was_bullish": True,
+                            "last_alert_price": None,
+                            "last_news_id": None
+                        }
+                if "_global_news" not in migrated:
+                    migrated["_global_news"] = []
                 return migrated
         except Exception:
-            return {}
-    return {}
+            return {"_global_news": []}
+    return {"_global_news": []}
 
 
 def save_cache(cache):
     try:
         with open(CACHE_FILE, 'w', encoding='utf-8') as f:
-            json.dump(cache, f, ensure_ascii=False)
+            json.dump(cache, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"Error saving cache: {e}")
 
 
-def get_latest_news(ticker):
+# ====================== جلب الأخبار (أرقام + تداول فقط) ======================
+def get_latest_news(symbol_code: str):
     """
-    يجلب أحدث خبر حقيقي للسهم من yfinance.
-    يعيد dict فيه id, title, link, publish_time أو None إن لم يوجد خبر مناسب.
+    يجلب أحدث خبر من مصادر موثوقة فقط (أرقام + تداول).
+    بدون أي استعلام عام.
     """
-    try:
-        news_items = yf.Ticker(ticker).news
-        if not news_items:
-            return None
+    company_name = SYMBOL_NAMES.get(symbol_code, "")
+    
+    queries = []
+    if company_name:
+        queries.append(f'site:argaam.com ("{company_name}" OR {symbol_code}) when:3d')
+        queries.append(f'site:saudiexchange.sa ("{company_name}" OR {symbol_code}) when:7d')
+    else:
+        queries.append(f'site:argaam.com {symbol_code} when:3d')
+        queries.append(f'site:saudiexchange.sa {symbol_code} when:7d')
 
-        for item in news_items:
-            # بعض إصدارات yfinance تضع البيانات مباشرة، وبعضها تحت مفتاح 'content'
-            content = item.get('content', item)
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+    }
 
-            news_id = item.get('id') or content.get('id') or content.get('title')
-            title = content.get('title') or content.get('summary')
-            link = (
-                content.get('canonicalUrl', {}).get('url')
-                if isinstance(content.get('canonicalUrl'), dict)
-                else content.get('link') or content.get('clickThroughUrl', {}).get('url')
-            )
-            pub_date = content.get('pubDate') or item.get('providerPublishTime')
+    for query in queries:
+        try:
+            url = f"https://news.google.com/rss/search?q={urllib.parse.quote(query)}&hl=ar&gl=SA&ceid=SA:ar"
+            resp = requests.get(url, timeout=10, headers=headers)
+            resp.raise_for_status()
+            root = ET.fromstring(resp.content)
 
-            # تطبيع الوقت إلى timestamp
-            pub_ts = None
-            if isinstance(pub_date, (int, float)):
-                pub_ts = float(pub_date)
-            elif isinstance(pub_date, str):
-                try:
-                    pub_ts = datetime.fromisoformat(pub_date.replace('Z', '+00:00')).timestamp()
-                except Exception:
-                    pub_ts = None
+            for item in root.findall('.//item')[:5]:
+                title = (item.findtext('title') or "").strip()
+                link = (item.findtext('link') or "").strip()
+                pub_date_str = item.findtext('pubDate')
+                source = (item.findtext('source') or "").lower()
 
-            if not title or not link:
-                continue
+                if not title or not link:
+                    continue
 
-            if pub_ts and (time.time() - pub_ts) > NEWS_MAX_AGE_HOURS * 3600:
-                continue
+                # فلترة العمر
+                if pub_date_str:
+                    try:
+                        pub_ts = parsedate_to_datetime(pub_date_str).timestamp()
+                        if (time.time() - pub_ts) > NEWS_MAX_AGE_HOURS * 3600:
+                            continue
+                    except Exception:
+                        pass
 
-            return {
-                'id': str(news_id) if news_id else title,
-                'title': title,
-                'link': link,
-            }
-    except Exception as e:
-        print(f"Error fetching news for {ticker}: {e}")
+                # فلترة الصلة
+                is_relevant = (
+                    symbol_code in title or
+                    (company_name and company_name in title)
+                )
+
+                is_preferred = any(s in source or s in title.lower() 
+                                   for s in ["ارقام", "argaam", "تداول", "saudiexchange"])
+
+                if is_relevant or is_preferred:
+                    return {
+                        'id': link,
+                        'title': title,
+                        'link': link,
+                        'source': source
+                    }
+
+        except Exception as e:
+            print(f"News query error ({symbol_code}): {e}")
+            continue
 
     return None
 
 
-def analyze_stock(ticker):
+# ====================== تحليل السهم ======================
+def safe_float(val):
+    if isinstance(val, pd.Series):
+        return float(val.iloc[0])
+    return float(val)
+
+
+def analyze_stock(ticker: str):
     try:
         symbol_code = ticker.replace('.SR', '')
 
-        df = yf.download(ticker, period='100d', interval='1d', progress=False)
+        df = yf.download(
+            ticker,
+            period='120d',
+            interval='1d',
+            progress=False,
+            auto_adjust=True,
+            threads=False
+        )
 
         if df.empty or len(df) < 50:
             return None
 
-        last_vol = float(df['Volume'].iloc[-1].iloc[0]) if isinstance(df['Volume'].iloc[-1], pd.Series) else float(df['Volume'].iloc[-1])
-        if last_vol == 0:
+        # معالجة MultiIndex إن وجدت
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+
+        if df['Volume'].iloc[-1] == 0 or pd.isna(df['Close'].iloc[-1]):
             return None
 
-        # حساب EMA
+        # EMA
         df['EMA_9'] = df['Close'].ewm(span=9, adjust=False).mean()
         df['EMA_21'] = df['Close'].ewm(span=21, adjust=False).mean()
 
-        # حساب RSI
+        # RSI
         delta = df['Close'].diff()
-        gain = delta.where(delta > 0, 0.0)
-        loss = -delta.where(delta < 0, 0.0)
-
+        gain = delta.clip(lower=0)
+        loss = -delta.clip(upper=0)
         avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
         avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
-
         rs = avg_gain / avg_loss
         df['RSI'] = 100 - (100 / (1 + rs))
 
-        df['Vol_SMA'] = df['Volume'].rolling(window=20).mean()
+        df['Vol_SMA'] = df['Volume'].rolling(20).mean()
 
         last = df.iloc[-1]
 
-        rsi_val = float(last['RSI'].iloc[0]) if isinstance(last['RSI'], pd.Series) else float(last['RSI'])
-        ema9_val = float(last['EMA_9'].iloc[0]) if isinstance(last['EMA_9'], pd.Series) else float(last['EMA_9'])
-        ema21_val = float(last['EMA_21'].iloc[0]) if isinstance(last['EMA_21'], pd.Series) else float(last['EMA_21'])
-        vol_val = float(last['Volume'].iloc[0]) if isinstance(last['Volume'], pd.Series) else float(last['Volume'])
-        vol_sma_val = float(last['Vol_SMA'].iloc[0]) if isinstance(last['Vol_SMA'], pd.Series) else float(last['Vol_SMA'])
-        close_price = float(last['Close'].iloc[0]) if isinstance(last['Close'], pd.Series) else float(last['Close'])
+        rsi = safe_float(last['RSI'])
+        ema9 = safe_float(last['EMA_9'])
+        ema21 = safe_float(last['EMA_21'])
+        vol = safe_float(last['Volume'])
+        vol_sma = safe_float(last['Vol_SMA'])
+        close = safe_float(last['Close'])
 
-        # شروط الدخول
-        ema_bullish = ema9_val > ema21_val
-        rsi_bullish = rsi_val > 55.0
-        volume_bullish = vol_val > vol_sma_val
+        if pd.isna(rsi) or pd.isna(vol_sma):
+            return None
 
-        is_bullish = ema_bullish and rsi_bullish and volume_bullish
+        # شروط الدخول (كما هي)
+        is_bullish = (ema9 > ema21) and (rsi > 55.0) and (vol > vol_sma)
 
         return {
             'symbol': symbol_code,
             'ticker': ticker,
             'is_bullish': is_bullish,
-            'price': round(close_price, 2),
-            'rsi': round(rsi_val, 2),
-            'ema9': round(ema9_val, 2),
-            'ema21': round(ema21_val, 2),
+            'price': round(close, 2),
+            'rsi': round(rsi, 1),
+            'ema9': round(ema9, 2),
+            'ema21': round(ema21, 2),
         }
     except Exception as e:
         print(f"Error processing {ticker}: {e}")
-    return None
+        return None
 
 
+# ====================== البرنامج الرئيسي ======================
 def main():
-    print("بدء فحص كامل أسهم السوق الرئيسي المفلترة...")
+    print(f"[{datetime.now():%Y-%m-%d %H:%M}] بدء فحص أسهم السوق الرئيسي...")
     cache = load_cache()
     signals = []
+    global_news = cache.get("_global_news", [])
 
-    for symbol in SYMBOLS:
+    for i, symbol in enumerate(SYMBOLS):
         result = analyze_stock(symbol)
         if result is None:
             continue
 
         symbol_code = result['symbol']
-        prev = cache.get(symbol_code, {"was_bullish": False, "last_alert_price": None, "last_news_id": None})
+        prev = cache.get(symbol_code, {
+            "was_bullish": False,
+            "last_alert_price": None,
+            "last_news_id": None
+        })
 
-        # === منع التكرار: نرسل فقط عند حدوث تحوّل جديد (من غير محقق إلى محقق) ===
+        # اكتشاف التحول الجديد فقط
         fresh_crossover = result['is_bullish'] and not prev.get('was_bullish', False)
 
-        # تحديث حالة السهم دائماً (سواء صعودي أو لا) حتى نكتشف التحوّل القادم بشكل صحيح
+        # تحديث الحالة دائمًا
         cache[symbol_code] = {
             "was_bullish": result['is_bullish'],
             "last_alert_price": result['price'] if fresh_crossover else prev.get('last_alert_price'),
@@ -209,31 +255,52 @@ def main():
         if not fresh_crossover:
             continue
 
-        # === جلب خبر حقيقي حديث للسهم (إن وجد) ===
-        news = get_latest_news(result['ticker'])
-        news_is_new = news and news['id'] != prev.get('last_news_id')
-        if news:
+        # جلب خبر جديد
+        news = get_latest_news(symbol_code)
+        
+        if news and news['id'] not in global_news and news['id'] != prev.get('last_news_id'):
             cache[symbol_code]['last_news_id'] = news['id']
+            global_news.append(news['id'])
+            result['news'] = news
+        else:
+            result['news'] = None
 
-        result['news'] = news if news_is_new else None
         signals.append(result)
 
+        # تأخير بسيط كل 15 سهم
+        if (i + 1) % 15 == 0:
+            time.sleep(1.2)
+
+    # حفظ قائمة الأخبار العالمية (آخر 80 خبر)
+    cache["_global_news"] = global_news[-80:]
+
     if signals:
-        message = "🚀 **تنبيه فرصة جديدة - السوق السعودي** 🚀\n\n"
+        message = "🚀 *تنبيه فرصة جديدة - السوق السعودي* 🚀\n\n"
         for s in signals:
-            message += f"🔹 **السهم:** `{s['symbol']}`\n"
-            message += f"📊 **السعر الحالي:** {s['price']} ريال\n"
-            message += f"📈 **RSI:** {s['rsi']}\n"
-            message += f"☁️ **EMA 9 / 21:** {s['ema9']} / {s['ema21']}\n"
-            message += f"📈 [الشارت المباشر (TradingView)](https://ar.tradingview.com/chart/?symbol=TADAWUL%3A{s['symbol']})\n"
+            message += (
+                f"🔹 *السهم:* `{s['symbol']}`\n"
+                f"📊 *السعر الحالي:* {s['price']} ريال\n"
+                f"📈 *RSI:* {s['rsi']}\n"
+                f"☁️ *EMA 9 / 21:* {s['ema9']} / {s['ema21']}\n"
+                f"📈 [الشارت المباشر](https://ar.tradingview.com/chart/?symbol=TADAWUL%3A{s['symbol']})\n"
+            )
             if s.get('news'):
-                message += f"📰 [{s['news']['title']}]({s['news']['link']})\n"
+                safe_title = s['news']['title'].replace('*', '').replace('_', '').replace('[', '').replace(']', '')
+                message += f"📰 [{safe_title}]({s['news']['link']})\n"
             else:
                 message += f"📰 [بحث عن أخبار السهم](https://sa.investing.com/search/?q={s['symbol']})\n"
             message += "-------------------\n"
 
-        bot.send_message(TELEGRAM_CHAT_ID, message, parse_mode='Markdown', disable_web_page_preview=True)
-        print(f"تم إرسال {len(signals)} تنبيه جديد إلى التلجرام.")
+        try:
+            bot.send_message(
+                TELEGRAM_CHAT_ID,
+                message,
+                parse_mode='Markdown',
+                disable_web_page_preview=True
+            )
+            print(f"تم إرسال {len(signals)} تنبيه جديد.")
+        except Exception as e:
+            print(f"خطأ في إرسال التلجرام: {e}")
     else:
         print("لا توجد تحولات صعودية جديدة في هذا الفحص.")
 
