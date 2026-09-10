@@ -10,7 +10,7 @@ TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
-# 2. قائمة أسهم السوق السعودي (يمكنك إضافة أي أسهم أخرى بالصيغة: XXXX.SR)
+# 2. قائمة أسهم السوق السعودي
 SYMBOLS = [
     '1120.SR', '1150.SR', '1180.SR', '2010.SR', '2222.SR', 
     '2380.SR', '7010.SR', '7020.SR', '4190.SR', '1211.SR',
@@ -28,11 +28,16 @@ def analyze_stock(ticker):
         df['EMA_9'] = df['Close'].ewm(span=9, adjust=False).mean()
         df['EMA_21'] = df['Close'].ewm(span=21, adjust=False).mean()
 
-        # حساب مؤشر القوة النسبية (RSI 14)
+        # حساب مؤشر RSI بطريقة Wilder's Smoothing (طريقة TradingView الدقيقة)
         delta = df['Close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss
+        gain = delta.where(delta > 0, 0.0)
+        loss = -delta.where(delta < 0, 0.0)
+
+        # alpha = 1/14 لمطابقة معادلة وايلدر المستخدمة في TradingView
+        avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
+        avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
+
+        rs = avg_gain / avg_loss
         df['RSI'] = 100 - (100 / (1 + rs))
 
         # حساب متوسط السيولة/الحجم (SMA Volume 20)
@@ -41,23 +46,25 @@ def analyze_stock(ticker):
         # القراءات الأخيرة
         last = df.iloc[-1]
 
-        # الشروط الشاملة:
-        # 1. تقاطع صاعد/سعر أعلى المتوسطات (EMA 9 > EMA 21)
-        ema_bullish = bool(last['EMA_9'].iloc[0] > last['EMA_21'].iloc[0]) if isinstance(last['EMA_9'], pd.Series) else bool(last['EMA_9'] > last['EMA_21'])
-        
-        # 2. مؤشر القوة النسبية أعلى من 55
+        # استخراج القيم الفردية بشكل آمن
         rsi_val = float(last['RSI'].iloc[0]) if isinstance(last['RSI'], pd.Series) else float(last['RSI'])
-        rsi_bullish = rsi_val > 55
-
-        # 3. حجم التداول أعلى من المتوسط (فلترة السيولة)
+        ema9_val = float(last['EMA_9'].iloc[0]) if isinstance(last['EMA_9'], pd.Series) else float(last['EMA_9'])
+        ema21_val = float(last['EMA_21'].iloc[0]) if isinstance(last['EMA_21'], pd.Series) else float(last['EMA_21'])
         vol_val = float(last['Volume'].iloc[0]) if isinstance(last['Volume'], pd.Series) else float(last['Volume'])
         vol_sma_val = float(last['Vol_SMA'].iloc[0]) if isinstance(last['Vol_SMA'], pd.Series) else float(last['Vol_SMA'])
+
+        # الشروط الشاملة:
+        # 1. متوسط 9 أعلى من 21 (EMA Cloud صاعد)
+        ema_bullish = ema9_val > ema21_val
+        
+        # 2. مؤشر القوة النسبية أعلى من 55 تماماً
+        rsi_bullish = rsi_val > 55.0
+
+        # 3. حجم التداول أعلى من المتوسط (فلترة السيولة)
         volume_bullish = vol_val > vol_sma_val
 
         if ema_bullish and rsi_bullish and volume_bullish:
             close_price = float(last['Close'].iloc[0]) if isinstance(last['Close'], pd.Series) else float(last['Close'])
-            ema9_val = float(last['EMA_9'].iloc[0]) if isinstance(last['EMA_9'], pd.Series) else float(last['EMA_9'])
-            ema21_val = float(last['EMA_21'].iloc[0]) if isinstance(last['EMA_21'], pd.Series) else float(last['EMA_21'])
 
             return {
                 'symbol': ticker.replace('.SR', ''),
@@ -71,7 +78,7 @@ def analyze_stock(ticker):
     return None
 
 def main():
-    print("بدء فحص أسهم السوق السعودي وفق الاستراتيجية...")
+    print("بدء فحص أسهم السوق السعودي وفق الاستراتيجية المعدلة...")
     signals = []
     
     for symbol in SYMBOLS:
@@ -84,7 +91,7 @@ def main():
         for s in signals:
             message += f"🔹 **السهم:** `{s['symbol']}`\n"
             message += f"📊 **السعر الحالي:** {s['price']} ريال\n"
-            message += f"📈 **RSI:** {s['rsi']}\n"
+            message += f"📈 **RSI (TradingView):** {s['rsi']}\n"
             message += f"☁️ **EMA 9 / 21:** {s['ema9']} / {s['ema21']}\n"
             message += "-------------------\n"
         
