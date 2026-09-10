@@ -2,7 +2,6 @@ name: Saudi Market Scanner
 
 on:
   schedule:
-    # تشغيل البوت كل 5 دقايق من الأحد للخميس (10:00 إلى 15:00 بتوقيت السعودية)
     - cron: '0 7-12 * * 0-4'
   workflow_dispatch:
 
