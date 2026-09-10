@@ -1,4 +1,6 @@
 import os
+import json
+import time
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -10,7 +12,7 @@ TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
-# 2. القائمة الشاملة لأسهم السوق الرئيسي المفلترة (تستبعد التأمين، البنوك عدا الراجحي والإنماء، نمو، والصناديق)
+# 2. القائمة الشاملة لأسهم السوق الرئيسي المفلترة
 SYMBOLS = [
     # المصارف المسموحة
     '1120.SR', '1150.SR',
@@ -27,29 +29,58 @@ SYMBOLS = [
     # النقل والخدمات اللوجستية
     '4031.SR', '4260.SR', '4261.SR', '4262.SR', '4263.SR',
     # إدارة وتطوير العقارات
-    '4020.SR', '4100.SR', '4130.SR', '4140.SR', '4150.SR', '4220.SR', '4230.SR', '4250.SR', '4300.SR', '4310.SR', '4320.SR', '4321.SR', '4322.SR',
-    # المرافق العامة والخدمات
-    '2083.SR', '2084.SR', '4061.SR', '5110.SR'
+    '4020.SR', '4100.SR', '4130.SR', '4140.SR', '4150.SR', '4220.SR', '4230.SR', '4250.SR', '4300.SR', '4310.SR', '4320.SR', '4321.SR', '4322.SR', '2083.SR', '2084.SR', '4061.SR', '5110.SR'
 ]
 
-def analyze_stock(ticker):
+CACHE_FILE = 'sent_signals.json'
+
+def load_sent_cache():
+    if os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE, 'r') as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+def save_sent_cache(cache):
     try:
+        with open(CACHE_FILE, 'w') as f:
+            json.dump(cache, f)
+    except Exception as e:
+        print(f"Error saving cache: {e}")
+
+def is_recently_sent(symbol, cache, cooldown_hours=24):
+    if symbol in cache:
+        last_sent_time = cache[symbol]
+        current_time = time.time()
+        # التأكد من مرور 24 ساعة (86,400 ثانية) قبل التنبيه مرة أخرى
+        if (current_time - last_sent_time) < (cooldown_hours * 3600):
+            return True
+    return False
+
+def analyze_stock(ticker, cache):
+    try:
+        symbol_code = ticker.replace('.SR', '')
+        
+        # تخطي السهم إذا تم إرسال تنبيه عنه مؤخراً
+        if is_recently_sent(symbol_code, cache):
+            return None
+
         df = yf.download(ticker, period='100d', interval='1d', progress=False)
         
-        # فلترة الأسهم الموقوفة أو التي لا تحتوي بيانات كافية
         if df.empty or len(df) < 50:
             return None
 
-        # التأكد من وجود تداول فعلي حديث (استبعاد الأسهم المعلقة)
         last_vol = float(df['Volume'].iloc[-1].iloc[0]) if isinstance(df['Volume'].iloc[-1], pd.Series) else float(df['Volume'].iloc[-1])
         if last_vol == 0:
             return None
 
-        # حساب المتوسطات المتحركة (EMA Cloud)
+        # حساب EMA
         df['EMA_9'] = df['Close'].ewm(span=9, adjust=False).mean()
         df['EMA_21'] = df['Close'].ewm(span=21, adjust=False).mean()
 
-        # حساب RSI بمعادلة Wilder's Smoothing المطابقة لـ TradingView
+        # حساب RSI بمعادلة Wilder's Smoothing
         delta = df['Close'].diff()
         gain = delta.where(delta > 0, 0.0)
         loss = -delta.where(delta < 0, 0.0)
@@ -60,26 +91,23 @@ def analyze_stock(ticker):
         rs = avg_gain / avg_loss
         df['RSI'] = 100 - (100 / (1 + rs))
 
-        # حساب متوسط حجم التداول 20 يوم
         df['Vol_SMA'] = df['Volume'].rolling(window=20).mean()
 
         last = df.iloc[-1]
 
-        # استخراج القيم الفردية
         rsi_val = float(last['RSI'].iloc[0]) if isinstance(last['RSI'], pd.Series) else float(last['RSI'])
         ema9_val = float(last['EMA_9'].iloc[0]) if isinstance(last['EMA_9'], pd.Series) else float(last['EMA_9'])
         ema21_val = float(last['EMA_21'].iloc[0]) if isinstance(last['EMA_21'], pd.Series) else float(last['EMA_21'])
         vol_val = float(last['Volume'].iloc[0]) if isinstance(last['Volume'], pd.Series) else float(last['Volume'])
         vol_sma_val = float(last['Vol_SMA'].iloc[0]) if isinstance(last['Vol_SMA'], pd.Series) else float(last['Vol_SMA'])
 
-        # تطبيق الشروط الفنية
+        # شروط الدخول
         ema_bullish = ema9_val > ema21_val
         rsi_bullish = rsi_val > 55.0
         volume_bullish = vol_val > vol_sma_val
 
         if ema_bullish and rsi_bullish and volume_bullish:
             close_price = float(last['Close'].iloc[0]) if isinstance(last['Close'], pd.Series) else float(last['Close'])
-            symbol_code = ticker.replace('.SR', '')
 
             return {
                 'symbol': symbol_code,
@@ -87,7 +115,8 @@ def analyze_stock(ticker):
                 'rsi': round(rsi_val, 2),
                 'ema9': round(ema9_val, 2),
                 'ema21': round(ema21_val, 2),
-                'tadawul_url': f"https://www.saudiexchange.sa/wps/portal/saudiexchange/hidden/company-profile-main/?companySymbol={symbol_code}",
+                # رابط إعلانات وإجراءات الشركات المباشر من تداول السعودية
+                'announcements_url': f"https://www.saudiexchange.sa/wps/portal/saudiexchange/hidden/company-profile-main/?companySymbol={symbol_code}",
                 'tv_url': f"https://ar.tradingview.com/symbols/TADAWUL-{symbol_code}/"
             }
     except Exception as e:
@@ -96,28 +125,33 @@ def analyze_stock(ticker):
 
 def main():
     print("بدء فحص كامل أسهم السوق الرئيسي المفلترة...")
+    sent_cache = load_sent_cache()
     signals = []
     
     for symbol in SYMBOLS:
-        result = analyze_stock(symbol)
+        result = analyze_stock(symbol, sent_cache)
         if result:
             signals.append(result)
 
     if signals:
-        message = "🚀 **تنبيه فرصة - السوق السعودي** 🚀\n\n"
+        message = "🚀 **تنبيه فرصة جديدة - السوق السعودي** 🚀\n\n"
         for s in signals:
             message += f"🔹 **السهم:** `{s['symbol']}`\n"
             message += f"📊 **السعر الحالي:** {s['price']} ريال\n"
             message += f"📈 **RSI (TradingView):** {s['rsi']}\n"
             message += f"☁️ **EMA 9 / 21:** {s['ema9']} / {s['ema21']}\n"
             message += f"📈 [الشارت المباشر (TradingView)]({s['tv_url']})\n"
-            message += f"🔗 [إفصاحات وبيانات تداول]({s['tadawul_url']})\n"
+            message += f"📰 [إعلانات وإجراءات الشركة (Saudi Exchange)]({s['announcements_url']})\n"
             message += "-------------------\n"
+            
+            # تحديث السجل للسهم لتجنب التكرار
+            sent_cache[s['symbol']] = time.time()
         
         bot.send_message(TELEGRAM_CHAT_ID, message, parse_mode='Markdown', disable_web_page_preview=True)
-        print(f"تم إرسال {len(signals)} تنبيه إلى التلجرام.")
+        save_sent_cache(sent_cache)
+        print(f"تم إرسال {len(signals)} تنبيه جديد إلى التلجرام.")
     else:
-        print("لا توجد أسهم تطابق شروط الاستراتيجية حالياً.")
+        print("لا توجد فرص جديدة أو تم إرسال تنبيهات لجميع الأسهم المطابقة خلال الـ 24 ساعة الماضية.")
 
 if __name__ == '__main__':
     main()
