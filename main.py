@@ -7,16 +7,16 @@ import pandas as pd
 import numpy as np
 import telebot
 
-# 1. جلب بيانات الاعتماد من المتغيرات السرية (Secrets)
+# 1. جلب بيانات الاعتماد من البيئة
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 
 UPSTASH_REDIS_REST_URL = os.environ.get('UPSTASH_REDIS_REST_URL')
 UPSTASH_REDIS_REST_TOKEN = os.environ.get('UPSTASH_REDIS_REST_TOKEN')
 
-# التحقق من وجود التوكن لتجنب انهيار التطبيق
 if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-    raise ValueError("خطأ: لم يتم ضبط TELEGRAM_TOKEN أو TELEGRAM_CHAT_ID في Secrets!")
+    print("❌ خطأ: يرجى إضافة TELEGRAM_TOKEN و TELEGRAM_CHAT_ID في GitHub Secrets أولاً!")
+    exit(0)
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
@@ -29,7 +29,7 @@ SYMBOLS = [
     '4031.SR', '4260.SR', '4261.SR', '4262.SR', '4263.SR', '4020.SR', '4100.SR', '4130.SR', '4140.SR', '4150.SR', '4220.SR', '4230.SR', '4250.SR', '4300.SR', '4310.SR', '4320.SR', '4321.SR', '4322.SR', '2083.SR', '2084.SR', '4061.SR', '5110.SR'
 ]
 
-# --- إدارة حظر التكرار (سحابي / محلي) ---
+# --- آلية منع التكرار ---
 def is_recently_sent(symbol):
     if UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN:
         try:
@@ -73,7 +73,7 @@ def save_sent(symbol):
     except Exception:
         pass
 
-# --- خوارزمية الدايفرجنس الإيجابي العادي والمخفي ---
+# --- دالة فحص الدايفرجنس ---
 def detect_divergence(closes, rsi):
     try:
         if len(closes) < 15:
@@ -82,11 +82,9 @@ def detect_divergence(closes, rsi):
         p1_price, p2_price = closes[-15], closes[-1]
         p1_rsi, p2_rsi = rsi[-15], rsi[-1]
 
-        # دايفرجنس إيجابي عادي
         if p2_price < p1_price and p2_rsi > p1_rsi:
             return "إيجابي عادي 🟢"
         
-        # دايفرجنس إيجابي مخفي
         if p2_price > p1_price and p2_rsi < p1_rsi:
             return "إيجابي مخفي 🟣"
     except Exception:
@@ -100,7 +98,6 @@ def analyze_stock(ticker):
         if is_recently_sent(symbol_code):
             return None
 
-        # تنظيف وتفادي أخطاء السلاسل متعددة الأبعاد MultiIndex
         df = yf.download(ticker, period='150d', interval='1d', progress=False)
         if df.empty or len(df) < 50:
             return None
@@ -112,13 +109,13 @@ def analyze_stock(ticker):
         if len(closes) < 50:
             return None
 
-        # حساب سحابات المتوسطات (8-21) و (34-50)
+        # حساب المتوسطات EMA
         ema8 = closes.ewm(span=8, adjust=False).mean()
         ema21 = closes.ewm(span=21, adjust=False).mean()
         ema34 = closes.ewm(span=34, adjust=False).mean()
         ema50 = closes.ewm(span=50, adjust=False).mean()
 
-        # حساب مؤشر RSI
+        # حساب RSI
         delta = closes.diff()
         gain = delta.where(delta > 0, 0.0)
         loss = -delta.where(delta < 0, 0.0)
@@ -134,11 +131,10 @@ def analyze_stock(ticker):
         e34_val = float(ema34.iloc[-1])
         e50_val = float(ema50.iloc[-1])
 
-        # تطبيق الشروط الفنية
+        # الشروط الفنية
         if (e8_val > e21_val) and (e34_val > e50_val) and (rsi_val > 55.0):
             div_status = detect_divergence(closes.values, rsi.values)
 
-            # استخراج الأهداف والوقف
             t1 = round(c_val * 1.02, 2)
             t2 = round(c_val * 1.04, 2)
             t3 = round(c_val * 1.06, 2)
@@ -161,46 +157,45 @@ def analyze_stock(ticker):
                 'tv_url': f"https://ar.tradingview.com/chart/?symbol=TADAWUL%3A{symbol_code}"
             }
     except Exception as e:
-        print(f"خطأ في السهم {ticker}: {e}")
+        print(f"خطأ في معالجة السهم {ticker}: {e}")
     return None
 
 def main():
-    print("بدء عملية تحليل البيانات والحسابات الفنية...")
-    signals = []
+    print("بدء فحص الأسهم...")
+    signals_count = 0
 
     for symbol in SYMBOLS:
-        res = analyze_stock(symbol)
-        if res:
-            signals.append(res)
+        s = analyze_stock(symbol)
+        if s:
+            # صياغة رسالة لكل سهم بشكل مستقل لتفادي تجاوز طول النص
+            msg = f"🎯 **تنبيه فرصة جديدة (سحابات EMA والدايفرجنس)** 🎯\n\n"
+            msg += f"🔹 **السهم:** `{s['symbol']}`\n"
+            msg += f"📍 **نقطة الدخول:** {s['entry']} ريال\n"
+            msg += f"📈 **RSI:** {s['rsi']}\n"
+            msg += f"☁️ **سحابة المتوسط (8-21):** {s['mid_cloud']}\n"
+            msg += f"☁️ **سحابة الاتجاه (34-50):** {s['long_cloud']}\n"
+            msg += f"🔄 **الدايفرجنس:** {s['divergence']}\n"
+            msg += "-------------------\n"
+            msg += f"🎯 **الهدف 1 (2%+):** {s['t1']} ريال\n"
+            msg += f"🎯 **الهدف 2 (4%+):** {s['t2']} ريال\n"
+            msg += f"🎯 **الهدف 3 (6%+):** {s['t3']} ريال\n"
+            msg += f"🎯 **الهدف 4 (8%+):** {s['t4']} ريال\n"
+            msg += "-------------------\n"
+            msg += f"🛑 **وقف الخسارة القريب (EMA 21):** {s['stop_near']} ريال\n"
+            msg += f"🩸 **الوقف الدموي (EMA 50):** {s['stop_bloody']} ريال\n"
+            msg += "-------------------\n"
+            msg += f"📈 [الشارت المباشر (TradingView)]({s['tv_url']})\n"
+            msg += f"📰 [أخبار وإفصاحات السهم (Investing.com)]({s['investing_url']})\n"
 
-    if signals:
-        message = "🎯 **تنبيه فرصة جديدة (سحابات EMA والدايفرجنس)** 🎯\n\n"
-        for s in signals:
-            message += f"🔹 **السهم:** `{s['symbol']}`\n"
-            message += f"📍 **نقطة الدخول:** {s['entry']} ريال\n"
-            message += f"📈 **RSI:** {s['rsi']}\n"
-            message += f"☁️ **سحابة المتوسط (8-21):** {s['mid_cloud']}\n"
-            message += f"☁️ **سحابة الاتجاه (34-50):** {s['long_cloud']}\n"
-            message += f"🔄 **الدايفرجنس:** {s['divergence']}\n"
-            message += "-------------------\n"
-            message += f"🎯 **الهدف 1 (2%+):** {s['t1']} ريال\n"
-            message += f"🎯 **الهدف 2 (4%+):** {s['t2']} ريال\n"
-            message += f"🎯 **الهدف 3 (6%+):** {s['t3']} ريال\n"
-            message += f"🎯 **الهدف 4 (8%+):** {s['t4']} ريال\n"
-            message += "-------------------\n"
-            message += f"🛑 **وقف الخسارة القريب (EMA 21):** {s['stop_near']} ريال\n"
-            message += f"🩸 **الوقف الدموي (EMA 50):** {s['stop_bloody']} ريال\n"
-            message += "-------------------\n"
-            message += f"📈 [الشارت المباشر (TradingView)]({s['tv_url']})\n"
-            message += f"📰 [أخبار وإفصاحات السهم (Investing.com)]({s['investing_url']})\n"
-            message += "===================\n"
+            try:
+                bot.send_message(TELEGRAM_CHAT_ID, msg, parse_mode='Markdown', disable_web_page_preview=True)
+                save_sent(s['symbol'])
+                signals_count += 1
+                time.sleep(0.5) # مهلة بسيطة بين كل إرسال
+            except Exception as e:
+                print(f"خطأ في إرسال السهم {s['symbol']}: {e}")
 
-            save_sent(s['symbol'])
-
-        bot.send_message(TELEGRAM_CHAT_ID, message, parse_mode='Markdown', disable_web_page_preview=True)
-        print(f"تم إرسال {len(signals)} تنبيه بنجاح.")
-    else:
-        print("لا توجد أسهم مطابقة للشروط الفنية حالياً.")
+    print(f"تم الانتهاء. إجمالي التنبيهات المرسلة: {signals_count}")
 
 if __name__ == '__main__':
     main()
