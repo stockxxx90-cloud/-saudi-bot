@@ -87,8 +87,8 @@ def analyze_stock(ticker):
                 'rsi': round(rsi_val, 2),
                 'ema9': round(ema9_val, 2),
                 'ema21': round(ema21_val, 2),
-                'tadawul_url': f"https://www.tadawul.com.sa/wps/portal/tadawul/market-participants/issuers/issuer-details?symbol={symbol_code}",
-                'tv_url': f"https://ar.tradingview.com/chart/?symbol=TADAWUL%3A{symbol_code}"
+                'tadawul_url': f"https://www.saudiexchange.sa/wps/portal/saudiexchange/hidden/company-profile-main/?companySymbol={symbol_code}",
+                'tv_url': f"https://ar.tradingview.com/symbols/TADAWUL-{symbol_code}/"
             }
     except Exception as e:
         print(f"Error processing {ticker}: {e}")
