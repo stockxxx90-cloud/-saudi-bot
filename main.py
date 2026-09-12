@@ -4,15 +4,14 @@ import time
 import requests
 
 # ----------------------------------------------------
-# 1. إعدادات بوت تليجرام (استبدل القيم الخاصة بك)
+# 1. بيانات تليجرام (تأكد من وضع القيم الخاصة بك)
 # ----------------------------------------------------
 TELEGRAM_BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
 TELEGRAM_CHAT_ID = "YOUR_CHAT_ID_HERE"
 
 def send_telegram_message(message):
-    """دالة إرسال الرسائل إلى تليجرام"""
     if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
-        print(f"📡 [محاكاة إرسال]: {message}")
+        print(f"⚠️ لم يتم وضع التوكن الخاص بتليجرام! الرسالة: {message}")
         return
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -24,28 +23,19 @@ def send_telegram_message(message):
     try:
         r = requests.post(url, json=payload, timeout=10)
         if r.status_code == 200:
-            print("✅ تم إرسال الرسالة بنجاح عبر تليجرام.")
+            print("✅ تم إرسال الرسالة بنجاح إلى تليجرام!")
         else:
-            print(f"❌ فشل إرسال تليجرام: {r.text}")
+            print(f"❌ خطأ من تليجرام: {r.text}")
     except Exception as e:
-        print(f"⚠️ خطأ أثناء الإرسال لتليجرام: {e}")
+        print(f"⚠️ فشل الاتصال بتليجرام: {e}")
+
 
 # ----------------------------------------------------
-# 2. إعدادات فحص التكرار (Redis + JSON)
+# 2. فحص التكرار (سجل الحظر)
 # ----------------------------------------------------
 
 def is_recently_sent(symbol):
-    if UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN:
-        try:
-            url = f"{UPSTASH_REDIS_REST_URL}/get/{symbol}"
-            headers = {"Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}"}
-            r = requests.get(url, headers=headers, timeout=10)
-            res = r.json()
-            if res.get("result") is not None:
-                return True
-        except Exception as e:
-            print(f"⚠️ فشل GET من Redis لـ {symbol}: {e}")
-
+    # فحص ملف JSON المحلي
     if os.path.exists('sent_signals.json'):
         try:
             with open('sent_signals.json', 'r') as f:
@@ -54,23 +44,10 @@ def is_recently_sent(symbol):
                     return True
         except Exception as e:
             print(f"⚠️ فشل قراءة الملف المحلي: {e}")
-            
     return False
 
 
 def save_sent(symbol):
-    if UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN:
-        try:
-            url = f"{UPSTASH_REDIS_REST_URL}/pipeline"
-            headers = {
-                "Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}",
-                "Content-Type": "application/json"
-            }
-            payload = [["SET", symbol, "SENT", "EX", 86400]]
-            requests.post(url, headers=headers, json=payload, timeout=10)
-        except Exception as e:
-            print(f"⚠️ فشل الحفظ في Redis لـ {symbol}: {e}")
-
     cache = {}
     current_time = time.time()
     if os.path.exists('sent_signals.json'):
@@ -89,43 +66,53 @@ def save_sent(symbol):
     except Exception as e:
         print(f"⚠️ فشل كتابة الملف المحلي: {e}")
 
+
 # ----------------------------------------------------
-# 3. منطق الشروط ومعالجة الإشارات
+# 3. دالة الفحص المحدثة مع طباعة أسباب التجاهل
 # ----------------------------------------------------
-
-def check_tasi_alert(tasi_change_pct):
-    if tasi_change_pct <= -1.0:
-        if not is_recently_sent("TASI_ALERT"):
-            msg = f"🚨 *تنبيه حماية السوق*\n\nتراجع مؤشر تاسي (TASI) بنسبة: *{tasi_change_pct}%*"
-            send_telegram_message(msg)
-            save_sent("TASI_ALERT")
-
-
-def should_send_signal(symbol_data, avg_volume_20d):
-    current_volume = symbol_data.get('volume', 0)
-    
-    is_volume_spike = current_volume >= (avg_volume_20d * 1.5) if avg_volume_20d > 0 else False
-    instant_breakout = symbol_data.get('instant_breakout', False)
-    instant_price_change = symbol_data.get('price_change_5m', 0) >= 1.5
-    medium_tf_confirmed = symbol_data.get('medium_tf_trend', False)
-
-    if (instant_breakout or instant_price_change or is_volume_spike) and medium_tf_confirmed:
-        return True
-
-    return False
-
 
 def process_market_and_signals(symbols_data_list, tasi_change_pct):
-    check_tasi_alert(tasi_change_pct)
+    # 1. فحص تاسي
+    if tasi_change_pct <= -1.0:
+        if not is_recently_sent("TASI_ALERT"):
+            send_telegram_message(f"🚨 *تنبيه مؤشر تاسي*\nتراجع المؤشر بنسبة: {tasi_change_pct}%")
+            save_sent("TASI_ALERT")
+        else:
+            print("ℹ️ تم إرسال تنبيه تاسي سابقاً خلال 24 ساعة.")
 
+    # 2. فحص الأسهم
     for symbol_data in symbols_data_list:
-        symbol = symbol_data['symbol']
-        avg_volume_20d = symbol_data.get('avg_volume_20d', 0)
+        symbol = symbol_data.get('symbol')
+        avg_vol = symbol_data.get('avg_volume_20d', 0)
+        curr_vol = symbol_data.get('volume', 0)
+        price_chg = symbol_data.get('price_change_5m', 0)
+        breakout = symbol_data.get('instant_breakout', False)
+        medium_tf = symbol_data.get('medium_tf_trend', False)
 
+        # فحص الحظر السابقي
         if is_recently_sent(symbol):
+            print(f"⏭️ {symbol}: تم تجاهله لأنه أُرسل مؤخراً خلال 24 ساعة.")
             continue
 
-        if should_send_signal(symbol_data, avg_volume_20d):
-            msg = f"🚀 *تنبيه إشارة إيجابية*\n\nالسهم: *{symbol}*\nالسيولة: *{symbol_data.get('volume', 0)}*\nالتغير اللحظي: *{symbol_data.get('price_change_5m', 0)}%*"
+        # فحص شرط التأكيد
+        if not medium_tf:
+            print(f"⛔ {symbol}: لم يرسل لأن الفاصل المتوسط غير مؤكد (medium_tf_trend = False).")
+            continue
+
+        # فحص الأسباب اللحظية
+        is_vol_spike = curr_vol >= (avg_vol * 1.5) if avg_vol > 0 else False
+        is_price_spike = price_chg >= 1.5
+
+        if is_vol_spike or is_price_check or breakout:
+            msg = f"🚀 *تنبيه إشارة إيجابية*\n\nالسهم: *{symbol}*\nالسيولة اللحظية: *{curr_vol}*\nالتغير اللحظي: *{price_chg}%*"
             send_telegram_message(msg)
             save_sent(symbol)
+        else:
+            print(f"ℹ️ {symbol}: تحقق شرط الاتجاه ولكن لم تتحقق أي إشارة لحظية (سيولة 1.5x أو اختراق أو تغير 1.5%+).")
+
+
+# ----------------------------------------------------
+# 4. تجربة سريعة (إرسال رسالة تجريبية الآن)
+# ----------------------------------------------------
+# للتأكد من أن تليجرام يعمل لديك، شغل السطر التالي مباشرة:
+# send_telegram_message("اختبار ربط البوت بنجاح! 🎯")
