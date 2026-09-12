@@ -4,20 +4,20 @@ import time
 import requests
 
 # ----------------------------------------------------
-# 1. إعدادات تليجرام و Redis
+# 1. الإعدادات الرئيسية (ضع بياناتك هنا)
 # ----------------------------------------------------
 TELEGRAM_BOT_TOKEN = "ضع_التوكن_هنا"
 TELEGRAM_CHAT_ID = "ضع_الـID_هنا"
 
-# جلب بيانات Redis من المتغيرات إن وجدت، وإلا استخدام قيم فارغة
-UPSTASH_REDIS_REST_URL = globals().get('UPSTASH_REDIS_REST_URL', os.getenv('UPSTASH_REDIS_REST_URL', ''))
-UPSTASH_REDIS_REST_TOKEN = globals().get('UPSTASH_REDIS_REST_TOKEN', os.getenv('UPSTASH_REDIS_REST_TOKEN', ''))
+UPSTASH_REDIS_REST_URL = os.getenv("UPSTASH_REDIS_REST_URL", "")
+UPSTASH_REDIS_REST_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN", "")
 
-
+# ----------------------------------------------------
+# 2. دالة الإرسال عبر تليجرام
+# ----------------------------------------------------
 def send_telegram_message(message):
-    """دالة إرسال الرسائل عبر تليجرام مع التحقق المباشر من النتيجة"""
     if not TELEGRAM_BOT_TOKEN or "ضع_التوكن" in TELEGRAM_BOT_TOKEN:
-        print("⚠️ [خطأ]: لم يتم تعيين TELEGRAM_BOT_TOKEN في الكود.")
+        print("⚠️ لم يتم ضبط TELEGRAM_BOT_TOKEN!")
         return False
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -30,49 +30,41 @@ def send_telegram_message(message):
         r = requests.post(url, json=payload, timeout=10)
         res = r.json()
         if r.status_code == 200 and res.get("ok"):
-            print("✅ تم الإرسال بنجاح إلى تليجرام!")
+            print(f"✅ تم الإرسال لتليجرام بنجاح!")
             return True
         else:
-            print(f"❌ رد تليجرام برفض الرسالة: {res.get('description')}")
+            print(f"❌ رفض تليجرام الرسالة: {res.get('description')}")
             return False
     except Exception as e:
-        print(f"⚠️ فشل الاتصال بخوادم تليجرام: {e}")
+        print(f"⚠️ فشل الاتصال بتليجرام: {e}")
         return False
 
-
 # ----------------------------------------------------
-# 2. إعدادات فحص التكرار (مُصححة ومضمونة)
+# 3. إعدادات فحص التكرار (Redis + JSON)
 # ----------------------------------------------------
-
 def is_recently_sent(symbol):
-    # 1. الفحص عبر Redis (إذا كان مفعلاً ومكتمل البيانات)
     if UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN:
         try:
             url = f"{UPSTASH_REDIS_REST_URL}/get/{symbol}"
             headers = {"Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}"}
             r = requests.get(url, headers=headers, timeout=5)
-            if r.status_code == 200:
-                res = r.json()
-                if res.get("result") is not None:
-                    return True
-        except Exception as e:
-            print(f"⚠️ فشل القراءة من Redis لـ {symbol}: {e}")
+            if r.status_code == 200 and r.json().get("result") is not None:
+                return True
+        except Exception:
+            pass
 
-    # 2. الفحص عبر الملف المحلي
     if os.path.exists('sent_signals.json'):
         try:
             with open('sent_signals.json', 'r') as f:
                 cache = json.load(f)
                 if symbol in cache and (time.time() - float(cache[symbol])) < 86400:
                     return True
-        except Exception as e:
-            print(f"⚠️ فشل قراءة الملف المحلي: {e}")
+        except Exception:
+            pass
 
     return False
 
-
 def save_sent(symbol):
-    # 1. الحفظ في Redis
     if UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN:
         try:
             url = f"{UPSTASH_REDIS_REST_URL}/pipeline"
@@ -82,10 +74,9 @@ def save_sent(symbol):
             }
             payload = [["SET", symbol, "SENT", "EX", 86400]]
             requests.post(url, headers=headers, json=payload, timeout=5)
-        except Exception as e:
-            print(f"⚠️ فشل الحفظ في Redis: {e}")
+        except Exception:
+            pass
 
-    # 2. الحفظ في الملف المحلي
     cache = {}
     current_time = time.time()
     if os.path.exists('sent_signals.json'):
@@ -95,23 +86,19 @@ def save_sent(symbol):
         except Exception:
             pass
 
-    # تنظيف السجلات القديمة
     cache = {k: v for k, v in cache.items() if (current_time - float(v)) < 86400}
     cache[symbol] = current_time
 
     try:
         with open('sent_signals.json', 'w') as f:
             json.dump(cache, f)
-    except Exception as e:
-        print(f"⚠️ فشل كتابة الملف المحلي: {e}")
-
+    except Exception:
+        pass
 
 # ----------------------------------------------------
-# 3. محرك الفحص المصحح (مع أمان البيانات)
+# 4. محرك معالجة الشروط
 # ----------------------------------------------------
-
 def process_market_and_signals(symbols_data_list, tasi_change_pct):
-    # تحويل نسبة تاسي لأرقام بأمان
     try:
         tasi_change_pct = float(tasi_change_pct)
     except (ValueError, TypeError):
@@ -133,7 +120,6 @@ def process_market_and_signals(symbols_data_list, tasi_change_pct):
         if not symbol:
             continue
 
-        # معالجة تحويل البيانات لأرقام تجنباً لأخطاء المقارنة
         try:
             avg_vol = float(symbol_data.get('avg_volume_20d', 0) or 0)
             curr_vol = float(symbol_data.get('volume', 0) or 0)
@@ -144,15 +130,9 @@ def process_market_and_signals(symbols_data_list, tasi_change_pct):
         breakout = bool(symbol_data.get('instant_breakout', False))
         medium_tf = bool(symbol_data.get('medium_tf_trend', True))
 
-        # فحص الحظر السابقي خلال 24 ساعة
-        if is_recently_sent(symbol):
+        if is_recently_sent(symbol) or not medium_tf:
             continue
 
-        # فحص شرط الفاصل المتوسط
-        if not medium_tf:
-            continue
-
-        # فحص الشروط اللحظية
         is_vol_spike = curr_vol >= (avg_vol * 1.5) if avg_vol > 0 else False
         is_price_spike = price_chg >= 1.5
 
@@ -163,6 +143,46 @@ def process_market_and_signals(symbols_data_list, tasi_change_pct):
                 f"📈 التغير اللحظي: *{price_chg}%*\n"
                 f"💧 السيولة اللحظية: *{curr_vol}*"
             )
-            print(f"🎯 تحققت الشروط للسهم {symbol}، جاري الإرسال...")
+            print(f"🎯 إشارات مكتملة لـ {symbol}.. جاري الإرسال.")
             if send_telegram_message(msg):
                 save_sent(symbol)
+
+# ----------------------------------------------------
+# 5. المشغل والمراقب الآلي (Main Loop)
+# ----------------------------------------------------
+def main():
+    print("🚀 تم بدء تشغيل محرك الرصد والتنبيهات...")
+    
+    # رسالة تجريبية أولية للتأكد من ربط تليجرام فور تشغيل السكربت
+    send_telegram_message("🤖 *بدء تشغيل بوت رصد الأسهم وتاسي بنجاح!*")
+
+    while True:
+        try:
+            print("\n🔄 جاري فحص بيانات السوق الآن...")
+            
+            # --- أضف كود جلب البيانات الخاص بك هنا ---
+            # مثال لبيانات تجريبية تحاكي تحقق الشروط لتأكيد الإرسال:
+            market_data = [
+                {
+                    'symbol': '1120',  # الراجحي مثلاً
+                    'volume': 1500000,
+                    'avg_volume_20d': 800000, # تحقق شرط 1.5x للسيولة
+                    'price_change_5m': 1.8,   # تحقق شرط 1.5%+
+                    'instant_breakout': True,
+                    'medium_tf_trend': True
+                }
+            ]
+            tasi_pct = -0.2 # نسبة تاسي
+            # ---------------------------------------
+
+            # تشغيل الفحص
+            process_market_and_signals(market_data, tasi_pct)
+
+        except Exception as e:
+            print(f"⚠️ خطأ غير متوقع في حلقة الفحص: {e}")
+
+        # الانتظار لمدة 60 ثانية قبل الفحص التالي
+        time.sleep(60)
+
+if __name__ == "__main__":
+    main()
